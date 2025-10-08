@@ -27,9 +27,11 @@ async def startup_event():
     """Initialize database tables on startup"""
     try:
         Base.metadata.create_all(bind=engine)
-        print("Database tables initialized successfully!")
+        print("✅ Database tables initialized successfully!")
+        print("✅ AI Gateway startup completed!")
     except Exception as e:
-        print(f"Database initialization failed: {e}")
+        print(f"❌ Database initialization failed: {e}")
+        print("⚠️ Continuing startup without database...")
         # Don't fail startup, let the app run and handle DB errors gracefully
 
 # Add CORS middleware
@@ -47,6 +49,11 @@ router = ProviderRouter()
 @app.get("/")
 async def root():
     return {"message": "AI Gateway is running!"}
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Render"""
+    return {"status": "healthy", "message": "AI Gateway is running!"}
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(
