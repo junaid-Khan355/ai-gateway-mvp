@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from app.database import get_db, engine
@@ -15,12 +15,37 @@ from app.auth import get_current_user, create_user
 from app.models import User
 import uuid
 import time
+import json
 
 app = FastAPI(
     title="AI Gateway",
     description="OpenAI-compatible AI Gateway with cost tracking",
     version="1.0.0"
 )
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests for debugging"""
+    if request.url.path.startswith("/v1/"):
+        body = await request.body()
+        print(f"\n🔍 Incoming Request to {request.url.path}")
+        print(f"   Method: {request.method}")
+        print(f"   Headers: {dict(request.headers)}")
+        if body:
+            try:
+                body_json = json.loads(body)
+                print(f"   Body: {json.dumps(body_json, indent=2)}")
+            except:
+                print(f"   Body (raw): {body.decode()}")
+        
+        # Important: Re-create request with body for downstream processing
+        async def receive():
+            return {"type": "http.request", "body": body}
+        
+        request._receive = receive
+    
+    response = await call_next(request)
+    return response
 
 @app.on_event("startup")
 async def startup_event():
@@ -62,6 +87,14 @@ async def chat_completions(
     db: Session = Depends(get_db)
 ):
     """OpenAI-compatible chat completions endpoint"""
+    # Debug logging
+    print(f"📝 Received chat completion request:")
+    print(f"   Model: {request.model}")
+    print(f"   Messages: {len(request.messages)} message(s)")
+    print(f"   Temperature: {request.temperature}")
+    print(f"   Max tokens: {request.max_tokens}")
+    print(f"   Stream: {request.stream}")
+    
     cost_tracker = CostTracker(db)
     
     try:

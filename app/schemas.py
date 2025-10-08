@@ -1,19 +1,34 @@
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 from uuid import UUID
 
 # Request/Response Schemas
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Optional[Union[str, List[Dict[str, Any]]]] = None  # Support both string and array content
+    name: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+    
+    class Config:
+        extra = "allow"  # Allow additional fields for compatibility
 
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
     stream: Optional[bool] = False
-    temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = None
+    temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0)
+    max_tokens: Optional[int] = Field(default=None, gt=0)
+    top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    frequency_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
+    presence_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
+    stop: Optional[Union[str, List[str]]] = None
+    n: Optional[int] = Field(default=1, ge=1)
+    user: Optional[str] = None
+    
+    class Config:
+        extra = "allow"  # Allow additional fields for compatibility
 
 class ChatCompletionResponse(BaseModel):
     id: str
