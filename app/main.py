@@ -16,14 +16,21 @@ from app.models import User
 import uuid
 import time
 
-# Create database tables
-Base.metadata.create_all(bind=engine)
-
 app = FastAPI(
     title="AI Gateway",
     description="OpenAI-compatible AI Gateway with cost tracking",
     version="1.0.0"
 )
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database tables on startup"""
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("Database tables initialized successfully!")
+    except Exception as e:
+        print(f"Database initialization failed: {e}")
+        # Don't fail startup, let the app run and handle DB errors gracefully
 
 # Add CORS middleware
 app.add_middleware(
