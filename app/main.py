@@ -114,59 +114,91 @@ async def chat_completions(
         print("🌊 Processing streaming response")
         print(f"🔍 Request stream flag: {request.stream}")
         from fastapi.responses import StreamingResponse
-        import httpx
         import json
         import asyncio
         
-        # Make direct streaming request to Vercel AI Gateway
+        # Convert streaming request to non-streaming for provider
+        print("⚠️ Converting streaming request to non-streaming for compatibility")
+        request.stream = False
+        
+        # Get non-streaming response first
+        result = await router.chat_completion(request)
+        
+        # Extract usage information
+        usage = result.get("usage", {})
+        input_tokens = usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", 0)
+        
+        # Calculate cost
+        provider = result.get("providerMetadata", {}).get("gateway", {}).get("provider", "unknown")
+        cost = cost_tracker.calculate_cost(provider, request.model, input_tokens, output_tokens)
+        
+        # Log request
+        request_id = cost_tracker.log_request(
+            user_id=current_user.id,
+            organization_id=current_user.organization_id,
+            provider=provider,
+            model=request.model,
+            request_type="chat_stream",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            cost_usd=cost,
+            latency_ms=result.get("providerMetadata", {}).get("gateway", {}).get("latency"),
+            status="success"
+        )
+        
+        # Get the response content
+        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        
+        # Create streaming response
         async def generate_stream():
-            try:
-                # Direct call to Vercel AI Gateway for streaming
-                headers = {
-                    "Authorization": f"Bearer {os.getenv('VERCEL_AI_GATEWAY_API_KEY', '')}",
-                    "Content-Type": "application/json"
-                }
-                
-                payload = {
+            # Send initial chunk
+            initial_chunk = {
+                "id": f"gen_{request_id.hex}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": request.model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": None
+                }]
+            }
+            yield f"data: {json.dumps(initial_chunk)}\n\n"
+            
+            # Split content into words for streaming effect
+            words = content.split()
+            for i, word in enumerate(words):
+                chunk = {
+                    "id": f"gen_{request_id.hex}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
                     "model": request.model,
-                    "messages": [{"role": msg.role, "content": msg.content} for msg in request.messages],
-                    "stream": True,
-                    "temperature": request.temperature,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": word + (" " if i < len(words) - 1 else "")},
+                        "finish_reason": None
+                    }]
                 }
-                
-                if request.max_tokens:
-                    payload["max_tokens"] = request.max_tokens
-                
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(
-                        "https://ai-gateway.vercel.sh/v1/chat/completions",
-                        headers=headers,
-                        json=payload
-                    )
-                    
-                    if response.status_code == 200:
-                        # Stream the response directly
-                        async for chunk in response.aiter_text():
-                            if chunk.strip():
-                                yield chunk
-                    else:
-                        error_chunk = {
-                            "error": {
-                                "message": f"Vercel AI Gateway error: {response.status_code}",
-                                "type": "provider_error"
-                            }
-                        }
-                        yield f"data: {json.dumps(error_chunk)}\n\n"
-                        
-            except Exception as e:
-                print(f"❌ Streaming error: {e}")
-                error_chunk = {
-                    "error": {
-                        "message": f"Streaming error: {str(e)}",
-                        "type": "streaming_error"
-                    }
-                }
-                yield f"data: {json.dumps(error_chunk)}\n\n"
+                yield f"data: {json.dumps(chunk)}\n\n"
+                await asyncio.sleep(0.05)  # Small delay for streaming effect
+            
+            # Send final chunk
+            final_chunk = {
+                "id": f"gen_{request_id.hex}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": request.model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }]
+            }
+            yield f"data: {json.dumps(final_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
         
         return StreamingResponse(
             generate_stream(),
