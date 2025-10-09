@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from app.database import get_db, engine
 from app.models import Base
@@ -15,7 +16,9 @@ from app.auth import get_current_user, create_user
 from app.models import User
 import uuid
 import time
+import os
 import json
+import asyncio
 
 app = FastAPI(
     title="AI Gateway",
@@ -80,7 +83,16 @@ async def health_check():
     """Health check endpoint for Render"""
     return {"status": "healthy", "message": "AI Gateway is running!"}
 
-@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+@app.get("/debug-streaming")
+async def debug_streaming():
+    """Debug endpoint to test streaming logic"""
+    return {
+        "streaming_support": True,
+        "message": "Streaming endpoint is accessible",
+        "timestamp": time.time()
+    }
+
+@app.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
     current_user: User = Depends(get_current_user),
@@ -97,9 +109,81 @@ async def chat_completions(
     
     cost_tracker = CostTracker(db)
     
+    # Handle streaming response first
+    if request.stream:
+        print("🌊 Processing streaming response")
+        print(f"🔍 Request stream flag: {request.stream}")
+        from fastapi.responses import StreamingResponse
+        import httpx
+        import json
+        import asyncio
+        
+        # Make direct streaming request to Vercel AI Gateway
+        async def generate_stream():
+            try:
+                # Direct call to Vercel AI Gateway for streaming
+                headers = {
+                    "Authorization": f"Bearer {os.getenv('VERCEL_AI_GATEWAY_API_KEY', '')}",
+                    "Content-Type": "application/json"
+                }
+                
+                payload = {
+                    "model": request.model,
+                    "messages": [{"role": msg.role, "content": msg.content} for msg in request.messages],
+                    "stream": True,
+                    "temperature": request.temperature,
+                }
+                
+                if request.max_tokens:
+                    payload["max_tokens"] = request.max_tokens
+                
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        "https://ai-gateway.vercel.sh/v1/chat/completions",
+                        headers=headers,
+                        json=payload
+                    )
+                    
+                    if response.status_code == 200:
+                        # Stream the response directly
+                        async for chunk in response.aiter_text():
+                            if chunk.strip():
+                                yield chunk
+                    else:
+                        error_chunk = {
+                            "error": {
+                                "message": f"Vercel AI Gateway error: {response.status_code}",
+                                "type": "provider_error"
+                            }
+                        }
+                        yield f"data: {json.dumps(error_chunk)}\n\n"
+                        
+            except Exception as e:
+                print(f"❌ Streaming error: {e}")
+                error_chunk = {
+                    "error": {
+                        "message": f"Streaming error: {str(e)}",
+                        "type": "streaming_error"
+                    }
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+        
+        return StreamingResponse(
+            generate_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Content-Type": "text/event-stream"
+            }
+        )
+    
+    # Non-streaming response (existing logic)
     try:
         # Route request to appropriate provider
         result = await router.chat_completion(request)
+        print(f"🔍 Provider result type: {type(result)}")
+        print(f"🔍 Provider result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
         
         # Extract usage information
         usage = result.get("usage", {})
@@ -132,21 +216,29 @@ async def chat_completions(
         return result
         
     except Exception as e:
+        print(f"❌ Error processing request: {str(e)}")
+        print(f"   Error type: {type(e).__name__}")
+        import traceback
+        traceback.print_exc()
+        
         # Log failed request
-        cost_tracker.log_request(
-            user_id=current_user.id,
-            organization_id=current_user.organization_id,
-            provider="unknown",
-            model=request.model,
-            request_type="chat",
-            input_tokens=0,
-            output_tokens=0,
-            total_tokens=0,
-            cost_usd=0,
-            latency_ms=0,
-            status="error",
-            error_message=str(e)
-        )
+        try:
+            cost_tracker.log_request(
+                user_id=current_user.id,
+                organization_id=current_user.organization_id,
+                provider="unknown",
+                model=request.model,
+                request_type="chat",
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                cost_usd=0,
+                latency_ms=0,
+                status="error",
+                error_message=str(e)
+            )
+        except Exception as log_error:
+            print(f"⚠️ Failed to log error: {log_error}")
         
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
